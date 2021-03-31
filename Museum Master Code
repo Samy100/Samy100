@@ -1,0 +1,149 @@
+#include "master.h"
+
+#include "common.h"
+#include <Arduino.h>
+#include <ArduinoBLE.h>
+#include <WiFiNINA.h>
+#include <NTPClient.h>
+#include <RTCZero.h>
+#include <ArduinoLowPower.h>
+
+
+char ssid[] = WIFI_NAME;
+char pass[] = WIFI_PASS;
+int status = WL_IDLE_STATUS;
+
+struct Payload recv;
+struct PayloadTime send;
+
+RTCZero rtc;
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", 0);
+
+void print2digits(int number) {
+  if (number < 10) {
+     Serial.print("0");
+  }
+  Serial.print(number);
+}
+
+void printTime() {
+  Serial.print(rtc.getYear());
+  Serial.print("-");
+  print2digits(rtc.getMonth());
+  Serial.print("-");
+  print2digits(rtc.getDay());
+  Serial.print(" ");
+
+  print2digits(rtc.getHours());
+  Serial.print(":");
+  print2digits(rtc.getMinutes());
+  Serial.print(":");
+  print2digits(rtc.getSeconds());
+  Serial.println(" UTC");
+}
+
+void device_setup() {
+  if (WiFi.status() == WL_NO_MODULE) {
+    Serial.println("starting WiFi failed!");
+    while (1);
+  }
+  String fv = WiFi.firmwareVersion();
+  if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
+    Serial.println("Please upgrade the firmware");
+  }
+  if(rtc.getEpoch() <= rtcMinTime) {
+    while (status != WL_CONNECTED) {
+      Serial.print("Connecting to WiFi SSID: ");
+      Serial.println(ssid);
+      status = WiFi.begin(ssid, pass);
+      delay(5000);
+    }
+    IPAddress ip = WiFi.localIP();
+    Serial.print("IP Address: ");
+    Serial.println(ip);
+    long rssi = WiFi.RSSI();
+    Serial.print("Signal strength (RSSI):");
+    Serial.println(rssi);
+    
+    timeClient.begin();
+    timeClient.update();
+    rtc.begin();
+    rtc.setEpoch(timeClient.getEpochTime());
+
+    WiFi.disconnect();
+    WiFi.end();
+  } else {
+    rtc.begin();
+    printTime();
+  }
+
+  if (!BLE.begin()) {
+    Serial.println("starting BLE failed!");
+    while (1);
+  }
+  Serial.println("waiting for devices..");
+  BLE.scanForUuid(BLE_UUID);
+}
+
+void connectSlave(BLEDevice peripheral) {
+    Serial.print("Connecting.. ");
+    if (peripheral.connect()) {
+      Serial.println("ok");
+    } else {
+      Serial.println("fail");
+      return;
+    }
+
+    // discover peripheral attributes
+    Serial.print("Discovering attributes.. ");
+    if (peripheral.discoverService(BLE_UUID)) {
+      Serial.println("ok");
+    } else {
+      Serial.println("fail");
+      peripheral.disconnect();
+      return;
+    }
+      
+    BLECharacteristic charact = peripheral.characteristic(CHR_UUID);
+
+    if (!charact) {
+      Serial.println("Peripheral does not have required characteristic!");
+      peripheral.disconnect();
+      return;
+    } else if (!charact.canRead()) {
+      Serial.println("Peripheral does not have a readable characteristic!");
+      peripheral.disconnect();
+      return;
+    }
+
+    charact.readValue(&recv, sizeof(struct Payload));
+    Serial.print("Temp: ");
+    Serial.print(recv.temp);
+    Serial.print(" Hum: ");
+    Serial.println(recv.hum);
+    printTime();
+    send.epoch = rtc.getEpoch();
+    send.alarm = send.epoch + 60;
+    charact.writeValue(&send, sizeof(struct PayloadTime));
+    peripheral.disconnect();
+}
+
+void device_loop() {
+  BLEDevice peripheral = BLE.available();
+
+  if (peripheral) {
+    Serial.print("Found ");
+    Serial.print(peripheral.address());
+    Serial.print(" '");
+    Serial.print(peripheral.localName());
+    Serial.print("' ");
+    Serial.print(peripheral.advertisedServiceUuid());
+    Serial.println();
+    
+    BLE.stopScan();
+    connectSlave(peripheral);
+    BLE.scanForUuid(BLE_UUID);
+  }
+    
+}
